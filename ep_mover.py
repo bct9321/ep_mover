@@ -7,6 +7,10 @@ This script compares two directories of TV episode files based on a composite ke
 for that same key, the source file is skipped. Otherwise, the file is moved,
 preserving the entire subfolder structure.
 
+Additionally, it now loads a 'tags_config.json' to detect custom tags (e.g. '4k', '1080p')
+in filenames and compute a preference score. If multiple source files map to the same key,
+the highest-scored file is chosen.
+
 By default, it prints minimal logs:
   - MOVE: <src> => <dest>
   - DRY-RUN: <src> => <dest>
@@ -24,6 +28,7 @@ import re
 import shutil
 import argparse
 import sys
+import json
 
 # -------------------------------------------------
 # Configuration: Minimal vs. Debug Logging
@@ -36,6 +41,42 @@ def debug_log(msg):
     """
     if DEBUG:
         print(f"[DEBUG] {msg}")
+
+# -------------------------------------------------
+# Load Tags Config
+# -------------------------------------------------
+def load_tags_config(config_path="tags_config.json"):
+    """
+    Loads a JSON file containing custom tags and their scores.
+    Example structure:
+      {
+        "tags": [
+          { "match": "4k",    "score": 30 },
+          { "match": "1080p", "score": 20 },
+          { "match": "720p",  "score": 10 }
+        ]
+      }
+    """
+    if not os.path.isfile(config_path):
+        debug_log(f"No tags_config found at '{config_path}'. Using empty tags list.")
+        return []
+    with open(config_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data.get("tags", [])
+
+def compute_file_score(filename, tags):
+    """
+    Scans the filename for each tag's 'match' string (case-insensitive).
+    If found, adds 'score' to total. Returns the sum of all matched tags.
+    """
+    lower_name = filename.lower()
+    total_score = 0
+    for entry in tags:
+        match_str = entry.get("match", "").lower()
+        score_val = entry.get("score", 0)
+        if match_str and match_str in lower_name:
+            total_score += score_val
+    return total_score
 
 # -------------------------------------------------
 # Pre-check to Avoid Common Mistakes
@@ -120,20 +161,27 @@ def get_top_level_show(path, base_dir):
     parts = rel_path.split(os.sep)
     return parts[0] if len(parts) > 1 else "NO_TOP_LEVEL"
 
-def build_files_by_key(directory):
+# -------------------------------------------------
+# Build dictionary with preference scoring
+# -------------------------------------------------
+def build_files_by_key(directory, tags_config=None):
     """
     Recursively walks 'directory' and builds a dictionary mapping:
-      (top_show, episode_code, file_type) -> [list of file paths].
+      (top_show, episode_code, file_type) -> single best file path (by highest score).
+    If multiple files match the same key, picks the highest-scored file (based on tags).
 
     Detailed debug logs:
       - Logs each root folder and its subdirectories.
       - Logs each file name, whether an SXXEXX code was found,
         and the final (top_show, code, type) key used.
+
     """
+    if tags_config is None:
+        tags_config = []
+
     debug_log(f"[build_files_by_key] Starting for directory: {directory}")
     files_dict = {}
 
-    # Walk through all subfolders in 'directory'
     for root, dirs, files in os.walk(directory):
         debug_log(f"[build_files_by_key] Entering root: '{root}'")
         debug_log(f"  Subdirectories: {dirs}")
@@ -143,19 +191,32 @@ def build_files_by_key(directory):
             debug_log(f"    [FILE] Examining '{file}' in '{root}'")
             code = get_episode_code(file)
             if code:
-                # We found an SXXEXX pattern
                 ftype = classify_file(file)
                 full_path = os.path.join(root, file)
                 top_show = get_top_level_show(full_path, directory)
                 key = (top_show, code, ftype)
 
-                debug_log(f"      => Found code='{code}', show='{top_show}', type='{ftype}' => Key={key}")
-                files_dict.setdefault(key, []).append(full_path)
+                # Compute file's score from tags
+                score = compute_file_score(file, tags_config)
+                debug_log(f"      => Found code='{code}', show='{top_show}', type='{ftype}', score={score}")
+
+                # If there's already a file for this key, pick the higher-scored one
+                if key not in files_dict:
+                    files_dict[key] = (score, full_path)
+                else:
+                    existing_score, existing_path = files_dict[key]
+                    if score > existing_score:
+                        files_dict[key] = (score, full_path)
             else:
                 debug_log(f"      => No SXXEXX code in '{file}', ignoring.")
 
+    # Convert (score, path) to just path for final usage
+    final_dict = {}
+    for key, (score, path) in files_dict.items():
+        final_dict[key] = path
+
     debug_log("[build_files_by_key] Finished building dictionary.\n")
-    return files_dict
+    return final_dict
 
 # -------------------------------------------------
 # Interactive Confirmation & Fallback Move
@@ -211,7 +272,7 @@ def log_move(src, dest, dry_run=False):
 def log_skip(src, reason):
     """
     Logs a single line for a skip action:
-      SKIP: <src> => <reason>
+      SKIP: <src> => {reason}
     """
     print(f"SKIP: {src} => {reason}")
 
@@ -221,18 +282,21 @@ def log_skip(src, reason):
 def move_missing_files(source_dir, target_dir, dry_run=False, interactive=True):
     """
     For each file in source_dir that has a recognized SXXEXX code, if the destination
-    does not have a file for (top_show, code, file_type), we move the first such file.
-    Otherwise we skip it. The entire relative path is replicated under target_dir.
+    does not have a file for (top_show, code, file_type), we move the highest-scored file
+    for that key. Otherwise we skip it. The entire relative path is replicated under target_dir.
     """
-    debug_log(f"Building dictionary for source: {source_dir}")
-    src_files = build_files_by_key(source_dir)
-    debug_log(f"Building dictionary for target: {target_dir}")
-    tgt_files = build_files_by_key(target_dir)
+    # Load tags config
+    tags = load_tags_config()
 
-    for key, src_paths in src_files.items():
-        debug_log(f"\nChecking key {key} => {src_paths}")
+    debug_log(f"Building dictionary for source: {source_dir}")
+    src_files = build_files_by_key(source_dir, tags_config=tags)
+
+    debug_log(f"Building dictionary for target: {target_dir}")
+    tgt_files = build_files_by_key(target_dir, tags_config=tags)
+
+    for key, src_path in src_files.items():
+        debug_log(f"\nChecking key {key} => {src_path}")
         if key not in tgt_files:
-            src_path = src_paths[0]
             rel_path = os.path.relpath(src_path, source_dir)
             dest_full_path = os.path.join(target_dir, rel_path)
             debug_log(f"  => Key not in target, preparing to move '{src_path}' to '{dest_full_path}'")
@@ -248,10 +312,11 @@ def move_missing_files(source_dir, target_dir, dry_run=False, interactive=True):
             log_move(src_path, dest_full_path, dry_run=dry_run)
             if not dry_run:
                 safe_move(src_path, dest_full_path)
-                tgt_files[key] = [dest_full_path]
+                # Mark it as present so subsequent checks skip
+                tgt_files[key] = dest_full_path
         else:
-            debug_log(f"  => Key {key} found in target => skipping {src_paths[0]}")
-            log_skip(src_paths[0], "code present in target")
+            debug_log(f"  => Key {key} found in target => skipping {src_path}")
+            log_skip(src_path, "code present in target")
 
 # -------------------------------------------------
 # Build Mode
@@ -264,7 +329,8 @@ def build_fake_scenario():
       - "expected_stay - SXXEXX.file" => match in target => stays
       - "destination_has - SXXEXX.file" => in target, blocks source
 
-    Now includes episodes like S01E100 and S01E1000 for extended tests.
+    Includes episodes like S01E100 and S01E1000 for extended tests.
+
     """
     base_dir = os.path.join(os.getcwd(), "fake_scenario")
     if os.path.exists(base_dir):
@@ -286,16 +352,18 @@ def build_fake_scenario():
     write_file(os.path.join(source_dir, "show_a", "season_01", "expected_stay - S01E01.file"),
                "Video content A S01E01 (blocked by target's S01E01 video)")
     write_file(os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E01.sub"),
-               "Subtitle content A S01E01")
+               "Subtitle content A S01E01 [1080p]")
     write_file(os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E02.file"),
-               "Video content A S01E02")
+               "Video content A S01E02 [4k]")
+    # ep 100
     write_file(os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E100.file"),
-               "Video content A S01E100 (test extended code)")
+               "Video content A S01E100 [4k]")
+    # ep 1000
     write_file(os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E1000.file"),
-               "Video content A S01E1000 (test extended code)")
+               "Video content A S01E1000 [1080p]")
 
     write_file(os.path.join(source_dir, "show_a", "season_02", "expected_move - S01E04.file"),
-               "Extra video content A S01E04")
+               "Extra video content A S01E04 [720p]")
 
     # show_b
     write_file(os.path.join(source_dir, "show_b", "season_01", "expected_stay - S01E05.file"),
@@ -303,19 +371,19 @@ def build_fake_scenario():
     write_file(os.path.join(source_dir, "show_b", "season_02", "expected_stay - S02E01.file"),
                "Video B S02E01 (blocked by target S02E01)")
     write_file(os.path.join(source_dir, "show_b", "season_02", "expected_move - S02E02.sub"),
-               "Subtitle B S02E02")
+               "Subtitle B S02E02 [1080p]")
 
     # show_c
     write_file(os.path.join(source_dir, "show_c", "season_01", "expected_move - S01E01.file"),
-               "Unique video content C S01E01")
+               "Unique video content C S01E01 [4k]")
 
     # show_x
     write_file(os.path.join(source_dir, "show_x", "season_01", "expected_stay - S01E01.file"),
-               "X S01E01 video (blocked by target S01E01)")
+               "X S01E01 video (blocked by target S01E01) [720p]")
 
     # show_y
     write_file(os.path.join(source_dir, "show_y", "season_01", "expected_move - S01E01.file"),
-               "Y S01E01 video")
+               "Y S01E01 video [1080p]")
 
     # Destination subfolders
     os.makedirs(os.path.join(dest_dir, "show_a", "season_01"), exist_ok=True)
