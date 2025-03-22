@@ -4,12 +4,8 @@ ep_mover.py
 
 This script compares two directories of TV episode files based on a composite key:
 (top-level show folder, SXXEXX code, file type). If the destination has a file
-for that same key, the source file is skipped. Otherwise, the file is moved,
-preserving the entire subfolder structure.
-
-Additionally, it now loads a 'tags_config.json' to detect custom tags (e.g. '4k', '1080p')
-in filenames and compute a preference score. If multiple source files map to the same key,
-the highest-scored file is chosen.
+for that same key, we now compare preference scores (based on tags_config.json).
+If the source file is higher-scored, we overwrite the target's file; otherwise we skip.
 
 By default, it prints minimal logs:
   - MOVE: <src> => <dest>
@@ -130,7 +126,7 @@ def all_files(directory):
 # -------------------------------------------------
 # Classification & Uniqueness Key
 # -------------------------------------------------
-VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.mpeg', '.mpg', '.file'}
+VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.mpeg', '.mpg'}
 SUBTITLE_EXTENSIONS = {'.sub', '.srt', '.ass', '.ssa'}
 
 def classify_file(filename):
@@ -145,10 +141,9 @@ def classify_file(filename):
 def get_episode_code(filename):
     """
     Extracts the SXXEXX pattern from 'filename' (case-insensitive).
-    Now supports up to 4 digits in the E-part, e.g. S01E100 or S01E1000.
+    Supports up to 4 digits in the E-part (S01E100, S01E1000).
     Returns uppercase code (e.g. "S01E100") or None if not found.
     """
-    # Updated regex: SxxExx+ up to 4 digits for E
     match = re.search(r'S\d{2}E\d{2,4}', filename, re.IGNORECASE)
     return match.group(0).upper() if match else None
 
@@ -167,14 +162,9 @@ def get_top_level_show(path, base_dir):
 def build_files_by_key(directory, tags_config=None):
     """
     Recursively walks 'directory' and builds a dictionary mapping:
-      (top_show, episode_code, file_type) -> single best file path (by highest score).
-    If multiple files match the same key, picks the highest-scored file (based on tags).
+      (top_show, episode_code, file_type) -> (score, path).
 
-    Detailed debug logs:
-      - Logs each root folder and its subdirectories.
-      - Logs each file name, whether an SXXEXX code was found,
-        and the final (top_show, code, type) key used.
-
+    If multiple files match the same key, picks the higher-scored file (based on tags).
     """
     if tags_config is None:
         tags_config = []
@@ -210,13 +200,8 @@ def build_files_by_key(directory, tags_config=None):
             else:
                 debug_log(f"      => No SXXEXX code in '{file}', ignoring.")
 
-    # Convert (score, path) to just path for final usage
-    final_dict = {}
-    for key, (score, path) in files_dict.items():
-        final_dict[key] = path
-
     debug_log("[build_files_by_key] Finished building dictionary.\n")
-    return final_dict
+    return files_dict  # returns { key: (score, path) }
 
 # -------------------------------------------------
 # Interactive Confirmation & Fallback Move
@@ -281,22 +266,26 @@ def log_skip(src, reason):
 # -------------------------------------------------
 def move_missing_files(source_dir, target_dir, dry_run=False, interactive=True):
     """
-    For each file in source_dir that has a recognized SXXEXX code, if the destination
-    does not have a file for (top_show, code, file_type), we move the highest-scored file
-    for that key. Otherwise we skip it. The entire relative path is replicated under target_dir.
+    For each file in source_dir that has a recognized SXXEXX code, compare it with any
+    existing file in the target for that same (top_show, code, file_type).
+      - If target doesn't have it, move source.
+      - If target does have it, compare scores:
+        * If source > target, remove target and move source
+        * Else skip source
     """
     # Load tags config
     tags = load_tags_config()
 
     debug_log(f"Building dictionary for source: {source_dir}")
-    src_files = build_files_by_key(source_dir, tags_config=tags)
-
+    src_files = build_files_by_key(source_dir, tags_config=tags)  # { key: (score, path) }
     debug_log(f"Building dictionary for target: {target_dir}")
-    tgt_files = build_files_by_key(target_dir, tags_config=tags)
+    tgt_files = build_files_by_key(target_dir, tags_config=tags)  # { key: (score, path) }
 
-    for key, src_path in src_files.items():
-        debug_log(f"\nChecking key {key} => {src_path}")
+    for key, (src_score, src_path) in src_files.items():
+        debug_log(f"\nChecking key {key} => (score={src_score}, path={src_path})")
+
         if key not in tgt_files:
+            # No file in target => move the source
             rel_path = os.path.relpath(src_path, source_dir)
             dest_full_path = os.path.join(target_dir, rel_path)
             debug_log(f"  => Key not in target, preparing to move '{src_path}' to '{dest_full_path}'")
@@ -312,26 +301,52 @@ def move_missing_files(source_dir, target_dir, dry_run=False, interactive=True):
             log_move(src_path, dest_full_path, dry_run=dry_run)
             if not dry_run:
                 safe_move(src_path, dest_full_path)
-                # Mark it as present so subsequent checks skip
-                tgt_files[key] = dest_full_path
+                # Mark it as present
+                tgt_files[key] = (src_score, dest_full_path)
         else:
-            debug_log(f"  => Key {key} found in target => skipping {src_path}")
-            log_skip(src_path, "code present in target")
+            # Compare scores
+            existing_tgt_score, existing_tgt_path = tgt_files[key]
+            debug_log(f"  => Key {key} found in target => comparing scores: src={src_score} vs tgt={existing_tgt_score}")
+            if src_score > existing_tgt_score:
+                # Overwrite target
+                debug_log(f"  => Source is higher scored => replacing target '{existing_tgt_path}'")
+                # Remove existing target file
+                if not dry_run:
+                    if os.path.exists(existing_tgt_path):
+                        os.remove(existing_tgt_path)
+
+                # Move the source file in
+                rel_path = os.path.relpath(src_path, source_dir)
+                dest_full_path = os.path.join(target_dir, rel_path)
+                if not confirm_action(src_path, dest_full_path, interactive):
+                    debug_log(f"  => User canceled {src_path}")
+                    log_skip(src_path, "user canceled (overwrite aborted)")
+                    continue
+                log_move(src_path, dest_full_path, dry_run=dry_run)
+                if not dry_run:
+                    safe_move(src_path, dest_full_path)
+                    tgt_files[key] = (src_score, dest_full_path)
+            else:
+                debug_log(f"  => Target is higher or equal => skipping {src_path}")
+                log_skip(src_path, "lower-scored than target")
 
 # -------------------------------------------------
 # Build Mode
 # -------------------------------------------------
 def build_fake_scenario():
     """
-    Creates a fake scenario with more intuitive naming:
-
-      - "expected_move - SXXEXX.file" => no match in target => moves
-      - "expected_stay - SXXEXX.file" => match in target => stays
-      - "destination_has - SXXEXX.file" => in target, blocks source
+    Creates a fake scenario with more intuitive naming, now using .mkv for videos and .ass for subs:
+      - "expected_move - SXXEXX [TAG].mkv" => no match in target => moves
+      - "expected_stay - SXXEXX [TAG].mkv" => match in target => stays
+      - "destination_has - SXXEXX [TAG].mkv" => in target, blocks source
 
     Includes episodes like S01E100 and S01E1000 for extended tests.
-
+    Demonstrates 720p, 1080p, 2160p in filenames for tag-based scoring.
     """
+
+    import os
+    import shutil
+
     base_dir = os.path.join(os.getcwd(), "fake_scenario")
     if os.path.exists(base_dir):
         shutil.rmtree(base_dir)
@@ -348,62 +363,103 @@ def build_fake_scenario():
     os.makedirs(os.path.join(source_dir, "show_x", "season_01"), exist_ok=True)
     os.makedirs(os.path.join(source_dir, "show_y", "season_01"), exist_ok=True)
 
-    # show_a
-    write_file(os.path.join(source_dir, "show_a", "season_01", "expected_stay - S01E01.file"),
-               "Video content A S01E01 (blocked by target's S01E01 video)")
-    write_file(os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E01.sub"),
-               "Subtitle content A S01E01 [1080p]")
-    write_file(os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E02.file"),
-               "Video content A S01E02 [4k]")
-    # ep 100
-    write_file(os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E100.file"),
-               "Video content A S01E100 [4k]")
-    # ep 1000
-    write_file(os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E1000.file"),
-               "Video content A S01E1000 [1080p]")
+    # show_a - Season 01
+    write_file(
+        os.path.join(source_dir, "show_a", "season_01", "expected_stay - S01E01 [720p].mkv"),
+        "Video content A S01E01 (blocked by target's S01E01) => 720p"
+    )
+    write_file(
+        os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E01 [1080p].ass"),
+        "Subtitle content A S01E01 => 1080p"
+    )
+    write_file(
+        os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E02 [2160p].mkv"),
+        "Video content A S01E02 => 4k"
+    )
+    # Extended episodes
+    write_file(
+        os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E100 [2160p].mkv"),
+        "Video content A S01E100 => 4k"
+    )
+    write_file(
+        os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E1000 [1080p].mkv"),
+        "Video content A S01E1000 => 1080p"
+    )
 
-    write_file(os.path.join(source_dir, "show_a", "season_02", "expected_move - S01E04.file"),
-               "Extra video content A S01E04 [720p]")
+    # show_a - Season 02
+    write_file(
+        os.path.join(source_dir, "show_a", "season_02", "expected_move - S01E04 [720p].mkv"),
+        "Extra video content A S01E04 => 720p"
+    )
 
     # show_b
-    write_file(os.path.join(source_dir, "show_b", "season_01", "expected_stay - S01E05.file"),
-               "Video B S01E05 (blocked by target S01E05)")
-    write_file(os.path.join(source_dir, "show_b", "season_02", "expected_stay - S02E01.file"),
-               "Video B S02E01 (blocked by target S02E01)")
-    write_file(os.path.join(source_dir, "show_b", "season_02", "expected_move - S02E02.sub"),
-               "Subtitle B S02E02 [1080p]")
+    write_file(
+        os.path.join(source_dir, "show_b", "season_01", "expected_stay - S01E05 [1080p].mkv"),
+        "Video B S01E05 => 1080p (blocked by target S01E05)"
+    )
+    write_file(
+        os.path.join(source_dir, "show_b", "season_02", "expected_stay - S02E01 [720p].mkv"),
+        "Video B S02E01 => 720p (blocked by target S02E01)"
+    )
+    write_file(
+        os.path.join(source_dir, "show_b", "season_02", "expected_move - S02E02 [1080p].ass"),
+        "Subtitle B S02E02 => 1080p"
+    )
 
     # show_c
-    write_file(os.path.join(source_dir, "show_c", "season_01", "expected_move - S01E01.file"),
-               "Unique video content C S01E01 [4k]")
+    write_file(
+        os.path.join(source_dir, "show_c", "season_01", "expected_move - S01E01 [2160p].mkv"),
+        "Unique video content C S01E01 => 4k"
+    )
 
     # show_x
-    write_file(os.path.join(source_dir, "show_x", "season_01", "expected_stay - S01E01.file"),
-               "X S01E01 video (blocked by target S01E01) [720p]")
+    write_file(
+        os.path.join(source_dir, "show_x", "season_01", "expected_stay - S01E01 [720p].mkv"),
+        "X S01E01 => 720p (blocked by target S01E01)"
+    )
 
     # show_y
-    write_file(os.path.join(source_dir, "show_y", "season_01", "expected_move - S01E01.file"),
-               "Y S01E01 video [1080p]")
+    write_file(
+        os.path.join(source_dir, "show_y", "season_01", "expected_move - S01E01 [1080p].mkv"),
+        "Y S01E01 => 1080p"
+    )
 
-    # Destination subfolders
+    # Create subfolders in destination
     os.makedirs(os.path.join(dest_dir, "show_a", "season_01"), exist_ok=True)
     os.makedirs(os.path.join(dest_dir, "show_b", "season_01"), exist_ok=True)
     os.makedirs(os.path.join(dest_dir, "show_b", "season_02"), exist_ok=True)
     os.makedirs(os.path.join(dest_dir, "show_d", "season_01"), exist_ok=True)
     os.makedirs(os.path.join(dest_dir, "show_x", "season_01"), exist_ok=True)
 
-    write_file(os.path.join(dest_dir, "show_a", "season_01", "destination_has - S01E01.file"),
-               "Video A S01E01 blocking source S01E01")
-    write_file(os.path.join(dest_dir, "show_b", "season_01", "destination_has - S01E05.file"),
-               "Video B S01E05 blocking source S01E05")
-    write_file(os.path.join(dest_dir, "show_b", "season_02", "destination_has - S02E01.file"),
-               "Video B S02E01 blocking source S02E01")
-    write_file(os.path.join(dest_dir, "show_d", "season_01", "uniqueD - S01E01.file"),
-               "Unique video D S01E01")
-    write_file(os.path.join(dest_dir, "show_x", "season_01", "destination_has - S01E01.file"),
-               "X S01E01 existing in target")
+    # Destination existing
+    write_file(
+        os.path.join(dest_dir, "show_a", "season_01", "destination_has - S01E01 [720p].mkv"),
+        "Video A S01E01 => 720p blocking the source's S01E01"
+    )
+    write_file(
+        os.path.join(dest_dir, "show_b", "season_01", "destination_has - S01E05 [1080p].mkv"),
+        "Video B S01E05 => 1080p blocking the source's S01E05"
+    )
+    write_file(
+        os.path.join(dest_dir, "show_b", "season_02", "destination_has - S02E01 [720p].mkv"),
+        "Video B S02E01 => 720p blocking the source's S02E01"
+    )
+    write_file(
+        os.path.join(dest_dir, "show_d", "season_01", "uniqueD - S01E01.mkv"),
+        "Unique video D S01E01 => not matched by anything in source"
+    )
+    write_file(
+        os.path.join(dest_dir, "show_x", "season_01", "destination_has - S01E01 [720p].mkv"),
+        "X S01E01 => 720p existing in target"
+    )
 
-    print("Fake scenario built successfully with clearer naming!")
+    # Add a lower-scored target file for S01E02 so we can see if the source's 2160p overwrites it
+    write_file(
+        os.path.join(dest_dir, "show_a", "season_01", "destination_has - S01E02 [1080p].mkv"),
+        "Video A S01E02 => 1080p, so source S01E02 [2160p].mkv can overwrite it if higher-scored"
+    )
+
+    print("Fake scenario built successfully with .mkv and .ass filenames, plus resolution tags!")
     print(f"Source Directory: {source_dir}")
     print(f"Destination Directory: {dest_dir}")
     print("\nFor example, run:")
@@ -414,7 +470,7 @@ def build_fake_scenario():
 # -------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Recursively move files based on (top-level show, SXXEXX code, file type) uniqueness."
+        description="Recursively move files based on (top-level show, SXXEXX code, file type) uniqueness and tag-based scoring."
     )
     subparsers = parser.add_subparsers(dest='command', help='Sub-command help')
 

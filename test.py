@@ -40,12 +40,12 @@ class ExtendedCoverageTests(unittest.TestCase):
         write_file(os.path.join(self.source_dir, "show_x", "second - S01E01.file"), "Content2")
 
         move_missing_files(self.source_dir, self.target_dir, dry_run=False, interactive=False)
-        target_files = build_files_by_key(self.target_dir)
 
-        # Key = ("show_x", "S01E01", "video")
-        # Now build_files_by_key() returns a single path (string), not a list.
-        moved_file = target_files[("show_x", "S01E01", "video")]
-        self.assertIn("first - S01E01.file", moved_file, "Expected the first file to be moved.")
+        # build_files_by_key now returns { key: (score, path) }, so we do [1] to get the path
+        target_files = build_files_by_key(self.target_dir)
+        moved_score, moved_path = target_files[("show_x", "S01E01", "video")]
+
+        self.assertIn("first - S01E01.file", moved_path, "Expected the first file to be moved.")
         self.assertTrue(
             os.path.exists(os.path.join(self.source_dir, "show_x", "second - S01E01.file")),
             "Second file remains in source."
@@ -166,7 +166,6 @@ class ExtendedCoverageTests(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.target_dir, "show_ext", "longer - S01E1000.file")),
                         "S01E1000 file should have moved.")
 
-    @unittest.skip("Performance or large-scale test - unskip if needed.")
     def test_large_number_of_files(self):
         """
         Stress test with a large number of files.
@@ -178,6 +177,34 @@ class ExtendedCoverageTests(unittest.TestCase):
             fname = f"mass_{i} - {code}.file"
             write_file(os.path.join(show_dir, fname), "content")
         move_missing_files(self.source_dir, self.target_dir, dry_run=False, interactive=False)
+
+    def test_overwrite_lower_scored_target(self):
+        """
+        If the target has a lower-scored S01E02 [1080p].mkv, and the source has
+        S01E02 [2160p].mkv, the source should overwrite the target.
+        """
+        # Make a tags_config with '2160p' > '1080p'
+        with patch("ep_mover.load_tags_config", return_value=[
+            {"match": "2160p", "score": 30},
+            {"match": "1080p", "score": 20}
+        ]):
+    
+            # Create target file with [1080p]
+            os.makedirs(os.path.join(self.target_dir, "show_x"), exist_ok=True)
+            target_file = os.path.join(self.target_dir, "show_x", "dest - S01E02 [1080p].mkv")
+            write_file(target_file, "Target is 1080p")
+    
+            # Create source file with [2160p]
+            os.makedirs(os.path.join(self.source_dir, "show_x"), exist_ok=True)
+            source_file = os.path.join(self.source_dir, "show_x", "source - S01E02 [2160p].mkv")
+            write_file(source_file, "Source is 2160p")
+    
+            move_missing_files(self.source_dir, self.target_dir, dry_run=False, interactive=False)
+    
+            # Overwrite expected => target_file removed, replaced by source
+            self.assertFalse(os.path.exists(target_file), "Lower-scored 1080p target file should be removed.")
+            new_target_path = os.path.join(self.target_dir, "show_x", "source - S01E02 [2160p].mkv")
+            self.assertTrue(os.path.exists(new_target_path), "Higher-scored 2160p file should now be in the target.")
 
 if __name__ == "__main__":
     unittest.main()
