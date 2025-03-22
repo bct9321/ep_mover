@@ -42,9 +42,9 @@ def debug_log(msg):
 # -------------------------------------------------
 def check_directory_validity(path, role):
     """
-    Ensures 'path' exists and warns if it's empty. 
+    Ensures 'path' exists and warns if it's empty.
     role = "source" or "destination" (for user-friendly messages).
-    
+
     Returns True if the user wants to proceed, False if they want to abort.
     """
     if not os.path.isdir(path):
@@ -53,7 +53,7 @@ def check_directory_validity(path, role):
         if user.strip().lower() != 'y':
             return False
         return True
-    
+
     # Count subfolders/files
     item_count = 0
     for root, dirs, files in os.walk(path):
@@ -103,10 +103,12 @@ def classify_file(filename):
 
 def get_episode_code(filename):
     """
-    Extracts the SXXEXX pattern from 'filename' (case-insensitive),
-    returns uppercase code (e.g. "S01E02") or None if not found.
+    Extracts the SXXEXX pattern from 'filename' (case-insensitive).
+    Now supports up to 4 digits in the E-part, e.g. S01E100 or S01E1000.
+    Returns uppercase code (e.g. "S01E100") or None if not found.
     """
-    match = re.search(r'S\d{2}E\d{2}', filename, re.IGNORECASE)
+    # Updated regex: SxxExx+ up to 4 digits for E
+    match = re.search(r'S\d{2}E\d{2,4}', filename, re.IGNORECASE)
     return match.group(0).upper() if match else None
 
 def get_top_level_show(path, base_dir):
@@ -125,7 +127,7 @@ def build_files_by_key(directory):
 
     Detailed debug logs:
       - Logs each root folder and its subdirectories.
-      - Logs each file name, whether an SXXEXX code was found, 
+      - Logs each file name, whether an SXXEXX code was found,
         and the final (top_show, code, type) key used.
     """
     debug_log(f"[build_files_by_key] Starting for directory: {directory}")
@@ -147,8 +149,7 @@ def build_files_by_key(directory):
                 top_show = get_top_level_show(full_path, directory)
                 key = (top_show, code, ftype)
 
-                debug_log(f"      => Found code='{code}', show='{top_show}', "
-                          f"type='{ftype}' => Key={key}")
+                debug_log(f"      => Found code='{code}', show='{top_show}', type='{ftype}' => Key={key}")
                 files_dict.setdefault(key, []).append(full_path)
             else:
                 debug_log(f"      => No SXXEXX code in '{file}', ignoring.")
@@ -227,7 +228,7 @@ def move_missing_files(source_dir, target_dir, dry_run=False, interactive=True):
     src_files = build_files_by_key(source_dir)
     debug_log(f"Building dictionary for target: {target_dir}")
     tgt_files = build_files_by_key(target_dir)
-    
+
     for key, src_paths in src_files.items():
         debug_log(f"\nChecking key {key} => {src_paths}")
         if key not in tgt_files:
@@ -235,7 +236,7 @@ def move_missing_files(source_dir, target_dir, dry_run=False, interactive=True):
             rel_path = os.path.relpath(src_path, source_dir)
             dest_full_path = os.path.join(target_dir, rel_path)
             debug_log(f"  => Key not in target, preparing to move '{src_path}' to '{dest_full_path}'")
-            
+
             if os.path.exists(dest_full_path):
                 debug_log(f"  => Collision: {dest_full_path} already exists; skipping.")
                 log_skip(src_path, "collision in target")
@@ -258,18 +259,20 @@ def move_missing_files(source_dir, target_dir, dry_run=False, interactive=True):
 def build_fake_scenario():
     """
     Creates a fake scenario with more intuitive naming:
-    
+
       - "expected_move - SXXEXX.file" => no match in target => moves
       - "expected_stay - SXXEXX.file" => match in target => stays
       - "destination_has - SXXEXX.file" => in target, blocks source
+
+    Now includes episodes like S01E100 and S01E1000 for extended tests.
     """
     base_dir = os.path.join(os.getcwd(), "fake_scenario")
     if os.path.exists(base_dir):
         shutil.rmtree(base_dir)
-    
+
     source_dir = os.path.join(base_dir, "shows")
     dest_dir = os.path.join(base_dir, "shows2")
-    
+
     # Create subfolders in source
     os.makedirs(os.path.join(source_dir, "show_a", "season_01"), exist_ok=True)
     os.makedirs(os.path.join(source_dir, "show_a", "season_02"), exist_ok=True)
@@ -278,55 +281,60 @@ def build_fake_scenario():
     os.makedirs(os.path.join(source_dir, "show_c", "season_01"), exist_ok=True)
     os.makedirs(os.path.join(source_dir, "show_x", "season_01"), exist_ok=True)
     os.makedirs(os.path.join(source_dir, "show_y", "season_01"), exist_ok=True)
-    
+
     # show_a
-    write_file(os.path.join(source_dir, "show_a", "season_01", "expected_stay - S01E01.file"), 
+    write_file(os.path.join(source_dir, "show_a", "season_01", "expected_stay - S01E01.file"),
                "Video content A S01E01 (blocked by target's S01E01 video)")
-    write_file(os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E01.sub"), 
+    write_file(os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E01.sub"),
                "Subtitle content A S01E01")
-    write_file(os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E02.file"), 
+    write_file(os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E02.file"),
                "Video content A S01E02")
-    write_file(os.path.join(source_dir, "show_a", "season_02", "expected_move - S01E04.file"), 
+    write_file(os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E100.file"),
+               "Video content A S01E100 (test extended code)")
+    write_file(os.path.join(source_dir, "show_a", "season_01", "expected_move - S01E1000.file"),
+               "Video content A S01E1000 (test extended code)")
+
+    write_file(os.path.join(source_dir, "show_a", "season_02", "expected_move - S01E04.file"),
                "Extra video content A S01E04")
-    
+
     # show_b
-    write_file(os.path.join(source_dir, "show_b", "season_01", "expected_stay - S01E05.file"), 
+    write_file(os.path.join(source_dir, "show_b", "season_01", "expected_stay - S01E05.file"),
                "Video B S01E05 (blocked by target S01E05)")
-    write_file(os.path.join(source_dir, "show_b", "season_02", "expected_stay - S02E01.file"), 
+    write_file(os.path.join(source_dir, "show_b", "season_02", "expected_stay - S02E01.file"),
                "Video B S02E01 (blocked by target S02E01)")
-    write_file(os.path.join(source_dir, "show_b", "season_02", "expected_move - S02E02.sub"), 
+    write_file(os.path.join(source_dir, "show_b", "season_02", "expected_move - S02E02.sub"),
                "Subtitle B S02E02")
-    
+
     # show_c
-    write_file(os.path.join(source_dir, "show_c", "season_01", "expected_move - S01E01.file"), 
+    write_file(os.path.join(source_dir, "show_c", "season_01", "expected_move - S01E01.file"),
                "Unique video content C S01E01")
-    
+
     # show_x
-    write_file(os.path.join(source_dir, "show_x", "season_01", "expected_stay - S01E01.file"), 
+    write_file(os.path.join(source_dir, "show_x", "season_01", "expected_stay - S01E01.file"),
                "X S01E01 video (blocked by target S01E01)")
-    
+
     # show_y
-    write_file(os.path.join(source_dir, "show_y", "season_01", "expected_move - S01E01.file"), 
+    write_file(os.path.join(source_dir, "show_y", "season_01", "expected_move - S01E01.file"),
                "Y S01E01 video")
-    
+
     # Destination subfolders
     os.makedirs(os.path.join(dest_dir, "show_a", "season_01"), exist_ok=True)
     os.makedirs(os.path.join(dest_dir, "show_b", "season_01"), exist_ok=True)
     os.makedirs(os.path.join(dest_dir, "show_b", "season_02"), exist_ok=True)
     os.makedirs(os.path.join(dest_dir, "show_d", "season_01"), exist_ok=True)
     os.makedirs(os.path.join(dest_dir, "show_x", "season_01"), exist_ok=True)
-    
-    write_file(os.path.join(dest_dir, "show_a", "season_01", "destination_has - S01E01.file"), 
+
+    write_file(os.path.join(dest_dir, "show_a", "season_01", "destination_has - S01E01.file"),
                "Video A S01E01 blocking source S01E01")
-    write_file(os.path.join(dest_dir, "show_b", "season_01", "destination_has - S01E05.file"), 
+    write_file(os.path.join(dest_dir, "show_b", "season_01", "destination_has - S01E05.file"),
                "Video B S01E05 blocking source S01E05")
-    write_file(os.path.join(dest_dir, "show_b", "season_02", "destination_has - S02E01.file"), 
+    write_file(os.path.join(dest_dir, "show_b", "season_02", "destination_has - S02E01.file"),
                "Video B S02E01 blocking source S02E01")
-    write_file(os.path.join(dest_dir, "show_d", "season_01", "uniqueD - S01E01.file"), 
+    write_file(os.path.join(dest_dir, "show_d", "season_01", "uniqueD - S01E01.file"),
                "Unique video D S01E01")
-    write_file(os.path.join(dest_dir, "show_x", "season_01", "destination_has - S01E01.file"), 
+    write_file(os.path.join(dest_dir, "show_x", "season_01", "destination_has - S01E01.file"),
                "X S01E01 existing in target")
-    
+
     print("Fake scenario built successfully with clearer naming!")
     print(f"Source Directory: {source_dir}")
     print(f"Destination Directory: {dest_dir}")
@@ -341,7 +349,7 @@ def main():
         description="Recursively move files based on (top-level show, SXXEXX code, file type) uniqueness."
     )
     subparsers = parser.add_subparsers(dest='command', help='Sub-command help')
-    
+
     run_parser = subparsers.add_parser('run', help='Run file move operation')
     run_parser.add_argument('source_dir', help='Path to the source directory (searched recursively)')
     run_parser.add_argument('target_dir', help='Path to the destination directory (files will be moved here, preserving subfolder structure)')
@@ -349,7 +357,7 @@ def main():
     run_parser.add_argument('--debug', action='store_true', help='Enable debug/verbose logs')
 
     build_parser = subparsers.add_parser('build', help='Build a more complex scenario for manual testing')
-    
+
     args = parser.parse_args()
     if args.command == 'run':
         global DEBUG

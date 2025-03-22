@@ -51,7 +51,7 @@ class ExtendedCoverageTests(unittest.TestCase):
     def test_multiple_target_files_same_episode_code(self):
         """
         If the target already has multiple files for the same (show, code, type),
-        we skip the source file. 
+        we skip the source file.
         """
         os.makedirs(os.path.join(self.target_dir, "show_x"), exist_ok=True)
         write_file(os.path.join(self.target_dir, "show_x", "already1 - S01E02.file"), "T content 1")
@@ -133,6 +133,21 @@ class ExtendedCoverageTests(unittest.TestCase):
         self.assertTrue(os.path.exists(src_file), "Source remains.")
         self.assertTrue(os.path.exists(dst_file), "Destination remains; skip due to collision.")
 
+    def test_extended_episode_number(self):
+        """
+        Test that S01E100 or S01E1000 are recognized as valid episode codes.
+        """
+        os.makedirs(os.path.join(self.source_dir, "show_ext"), exist_ok=True)
+        write_file(os.path.join(self.source_dir, "show_ext", "long - S01E100.file"), "Extended code 100")
+        write_file(os.path.join(self.source_dir, "show_ext", "longer - S01E1000.file"), "Extended code 1000")
+
+        move_missing_files(self.source_dir, self.target_dir, dry_run=False, interactive=False)
+        # Check that both moved
+        self.assertTrue(os.path.exists(os.path.join(self.target_dir, "show_ext", "long - S01E100.file")),
+                        "S01E100 file should have moved.")
+        self.assertTrue(os.path.exists(os.path.join(self.target_dir, "show_ext", "longer - S01E1000.file")),
+                        "S01E1000 file should have moved.")
+
     @unittest.skip("Performance or large-scale test - unskip if needed.")
     def test_large_number_of_files(self):
         """
@@ -141,7 +156,7 @@ class ExtendedCoverageTests(unittest.TestCase):
         show_dir = os.path.join(self.source_dir, "show_mass")
         os.makedirs(show_dir, exist_ok=True)
         for i in range(500):
-            code = f"S01E{(i % 99) + 1:02d}"
+            code = f"S01E{(i % 999) + 1:02d}"
             fname = f"mass_{i} - {code}.file"
             write_file(os.path.join(show_dir, fname), "content")
         move_missing_files(self.source_dir, self.target_dir, dry_run=False, interactive=False)
