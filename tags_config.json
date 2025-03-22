@@ -1,0 +1,8 @@
+{
+  "tags": [
+    { "match": "4k", "score": 30 },
+    { "match": "2160",  "score": 30 },
+    { "match": "1080", "score": 20 },
+    { "match": "720", "score": 10 }
+  ]
+}

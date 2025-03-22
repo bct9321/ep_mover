@@ -32,7 +32,8 @@ class ExtendedCoverageTests(unittest.TestCase):
 
     def test_multiple_source_files_same_episode_code(self):
         """
-        If multiple files in the source have the same (show, code, type), only the first is moved.
+        If multiple files in the source have the same (show, code, type),
+        only the first is moved (based on default or tag logic).
         """
         os.makedirs(os.path.join(self.source_dir, "show_x"), exist_ok=True)
         write_file(os.path.join(self.source_dir, "show_x", "first - S01E01.file"), "Content1")
@@ -42,11 +43,13 @@ class ExtendedCoverageTests(unittest.TestCase):
         target_files = build_files_by_key(self.target_dir)
 
         # Key = ("show_x", "S01E01", "video")
-        self.assertIn(("show_x", "S01E01", "video"), target_files, "One file for S01E01 was moved.")
-        moved_file = target_files[("show_x", "S01E01", "video")][0]
+        # Now build_files_by_key() returns a single path (string), not a list.
+        moved_file = target_files[("show_x", "S01E01", "video")]
         self.assertIn("first - S01E01.file", moved_file, "Expected the first file to be moved.")
-        self.assertTrue(os.path.exists(os.path.join(self.source_dir, "show_x", "second - S01E01.file")),
-                        "Second file remains in source.")
+        self.assertTrue(
+            os.path.exists(os.path.join(self.source_dir, "show_x", "second - S01E01.file")),
+            "Second file remains in source."
+        )
 
     def test_multiple_target_files_same_episode_code(self):
         """
@@ -61,8 +64,10 @@ class ExtendedCoverageTests(unittest.TestCase):
         write_file(os.path.join(self.source_dir, "show_x", "source - S01E02.file"), "S content")
 
         move_missing_files(self.source_dir, self.target_dir, dry_run=False, interactive=False)
-        self.assertTrue(os.path.exists(os.path.join(self.source_dir, "show_x", "source - S01E02.file")),
-                        "Source file remains because target has S01E02 already.")
+        self.assertTrue(
+            os.path.exists(os.path.join(self.source_dir, "show_x", "source - S01E02.file")),
+            "Source file remains because target has S01E02 already."
+        )
 
     def test_mixed_file_formats_same_episode(self):
         """
@@ -75,8 +80,10 @@ class ExtendedCoverageTests(unittest.TestCase):
         write_file(os.path.join(self.source_dir, "show_x", "maybe - S01E01.mkv"), "S mkv")
 
         move_missing_files(self.source_dir, self.target_dir, dry_run=False, interactive=False)
-        self.assertTrue(os.path.exists(os.path.join(self.source_dir, "show_x", "maybe - S01E01.mkv")),
-                        "Should remain in source, since target had show_x/S01E01 video already.")
+        self.assertTrue(
+            os.path.exists(os.path.join(self.source_dir, "show_x", "maybe - S01E01.mkv")),
+            "Should remain in source, since target had show_x/S01E01 video already."
+        )
 
     def test_no_episode_code(self):
         """
@@ -85,10 +92,14 @@ class ExtendedCoverageTests(unittest.TestCase):
         write_file(os.path.join(self.source_dir, "random.file"), "No code here")
 
         move_missing_files(self.source_dir, self.target_dir, dry_run=False, interactive=False)
-        self.assertTrue(os.path.exists(os.path.join(self.source_dir, "random.file")),
-                        "No code => not moved.")
-        self.assertFalse(os.path.exists(os.path.join(self.target_dir, "random.file")),
-                         "Should not appear in target.")
+        self.assertTrue(
+            os.path.exists(os.path.join(self.source_dir, "random.file")),
+            "No code => not moved."
+        )
+        self.assertFalse(
+            os.path.exists(os.path.join(self.target_dir, "random.file")),
+            "Should not appear in target."
+        )
 
     def test_top_level_missing_folder(self):
         """
@@ -98,13 +109,16 @@ class ExtendedCoverageTests(unittest.TestCase):
         write_file(os.path.join(self.source_dir, "should_move - S01E01.file"), "Root content")
 
         move_missing_files(self.source_dir, self.target_dir, dry_run=False, interactive=False)
-        self.assertTrue(os.path.exists(os.path.join(self.target_dir, "should_move - S01E01.file")),
-                        "File from root => moved to target root if no match.")
+        self.assertTrue(
+            os.path.exists(os.path.join(self.target_dir, "should_move - S01E01.file")),
+            "File from root => moved to target root if no match."
+        )
 
     @patch("builtins.input", side_effect=["", "ALWAYS"])
     def test_interactive_behavior(self, mock_input):
         """
-        Mock user input: first press Enter => confirm first file, second type "ALWAYS" => confirm all subsequent.
+        Mock user input: first press Enter => confirm first file,
+        second type "ALWAYS" => confirm all subsequent.
         """
         os.makedirs(os.path.join(self.source_dir, "show_x"), exist_ok=True)
         write_file(os.path.join(self.source_dir, "show_x", "should_move1 - S01E01.file"), "File content 1")
@@ -112,8 +126,12 @@ class ExtendedCoverageTests(unittest.TestCase):
 
         move_missing_files(self.source_dir, self.target_dir, dry_run=False, interactive=True)
 
-        self.assertTrue(os.path.exists(os.path.join(self.target_dir, "show_x", "should_move1 - S01E01.file")))
-        self.assertTrue(os.path.exists(os.path.join(self.target_dir, "show_x", "should_move2 - S01E01.sub")))
+        self.assertTrue(
+            os.path.exists(os.path.join(self.target_dir, "show_x", "should_move1 - S01E01.file"))
+        )
+        self.assertTrue(
+            os.path.exists(os.path.join(self.target_dir, "show_x", "should_move2 - S01E01.sub"))
+        )
 
     def test_filename_collision(self):
         """
